@@ -352,12 +352,12 @@ _DANGEROUS_ADDITION_RE = re.compile(
     r"ignore[_ -]?(?:auth|authorization|validation|verify)|"
     r"permit[_ -]?all|admin[_ -]?override|trust[_ -]?all|unsafe|insecure|"
     r"force[_ -]?(?:allow|send|delete|write))\b|"
-    r"\bverify\s*=\s*false\b|--(?:skip|no)[-_](?:auth|verify|checks?)",
+     r"\bverify\s*=\s*false\b|--(?:skip|no)[-_](?:auth|verify|checks?))",
     re.IGNORECASE,
 )
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"\b(?:api[_ -]?key|access[_ -]?key|secret(?:[_ -]?key)?|password|passwd|"
-    r"private[_ -]?key|client[_ -]?secret|access[_ -]?token)\b\s*[:=]",
+    r"private[_ -]?key|client[_ -]?secret|access[_ -]?token)\b\s*[\"']?\s*[:=]",
     re.IGNORECASE,
 )
 _SIDE_EFFECT_RE = re.compile(
@@ -433,7 +433,9 @@ def analyze_file(record: DiffFile, reviewer_focus: str | None = None) -> ReviewR
         add_factor("secrets or credential material")
     elif added_text and _SECRET_ASSIGNMENT_RE.search(added_text):
         add_factor("secrets or credential material")
-    if _SIDE_EFFECT_RE.search(signal_text):
+    has_retry = re.search(r"\bretr(?:y|ies|ied)\b|backoff", signal_text)
+    has_side_effect = _SIDE_EFFECT_RE.search(signal_text)
+    if (has_retry and has_side_effect) or re.search(r"allow[_ -]?duplicate|idempot", signal_text):
         add_factor("side-effect retry behavior")
     if reviewer_focus and reviewer_focus.lower() in path_lower + " " + text:
         add_factor(f"reviewer focus: {reviewer_focus}")
@@ -544,6 +546,11 @@ def analyze_file(record: DiffFile, reviewer_focus: str | None = None) -> ReviewR
         "data migration or persistence boundary": 10,
         "externally visible contract": 8,
         "state transition or failure-mode behavior": 8,
+        "removed security check": 12,
+        "dangerous added flag or bypass": 12,
+        "secrets or credential material": 12,
+        "deletion-heavy change": 6,
+        "side-effect retry behavior": 10,
         "error handling or recovery path": 4,
         "boundary-sensitive transformation": 4,
     }
@@ -575,15 +582,17 @@ def rank_reports(reports: Iterable[Mapping[str, Any]]) -> list[ReviewReport]:
 
     confidence_order = {"low": 0, "medium": 1, "high": 2}
 
-    def sort_key(report: Mapping[str, Any]) -> tuple[int, int, int, str]:
+    def sort_key(report: Mapping[str, Any]) -> tuple[int, int, int, str, str]:
         files = report.get("files", [])
         path = str(files[0]) if files else str(report.get("unit", ""))
+        unit = str(report.get("unit", ""))
         confidence = str(report.get("confidence", "low")).lower()
         return (
             -int(report.get("risk_score", 1)),
             confidence_order.get(confidence, 0),
             -int(report.get("behavioral_surface", 0)),
             path,
+            unit,
         )
 
     return [dict(report) for report in sorted(reports, key=sort_key)]  # type: ignore[misc]
