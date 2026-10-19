@@ -352,7 +352,7 @@ _DANGEROUS_ADDITION_RE = re.compile(
     r"ignore[_ -]?(?:auth|authorization|validation|verify)|"
     r"permit[_ -]?all|admin[_ -]?override|trust[_ -]?all|unsafe|insecure|"
     r"force[_ -]?(?:allow|send|delete|write))\b|"
-     r"\bverify\s*=\s*false\b|--(?:skip|no)[-_](?:auth|verify|checks?))",
+    r"\bverify\s*=\s*false\b|--(?:skip|no)[-_](?:auth|verify|checks?))",
     re.IGNORECASE,
 )
 _SECRET_ASSIGNMENT_RE = re.compile(
@@ -396,7 +396,12 @@ def analyze_file(record: DiffFile, reviewer_focus: str | None = None) -> ReviewR
             factors.append(label)
 
     is_docs = bool(re.search(r"(^|/)(docs?|readme|changelog)(/|$)|\.(md|rst|txt)$", path_lower))
-    is_test = bool(re.search(r"(^|/)(test|tests|spec)(/|$)|(^|[_.-])(test|spec)\.", path_lower))
+    is_test = bool(
+        re.search(
+            r"(^|/)(?:test|tests|spec)(?:/|$)|(^|[_.-])(?:test|spec)(?:[_-]|\.)",
+            path_lower,
+        )
+    )
     if record.status == "binary":
         add_factor("binary or generated content is difficult to inspect")
     if is_docs:

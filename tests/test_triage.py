@@ -2,7 +2,7 @@ import json
 import unittest
 from pathlib import Path
 
-from app.triage import DiffParseError, parse_unified_diff, triage_diff
+from app.triage import DiffParseError, analyze_file, parse_unified_diff, rank_reports, triage_diff
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -72,6 +72,119 @@ class TriagePipelineTest(unittest.TestCase):
     def test_parser_rejects_non_diff_text(self) -> None:
         with self.assertRaises(DiffParseError):
             parse_unified_diff("this is not a unified diff")
+
+    def test_parser_unquotes_paths_with_spaces(self) -> None:
+        diff = (
+            'diff --git "a/src/space name.py" "b/src/space name.py"\n'
+            '--- "a/src/space name.py"\n'
+            '+++ "b/src/space name.py"\n'
+            '@@ -1 +1 @@\n'
+            '-return 1\n'
+            '+return 2\n'
+        )
+
+        records = parse_unified_diff(diff)
+
+        self.assertEqual(records[0].path, "src/space name.py")
+        self.assertEqual(records[0].old_path, "src/space name.py")
+        self.assertEqual(records[0].new_path, "src/space name.py")
+
+    def test_binary_and_rename_records_keep_changed_file_coverage(self) -> None:
+        diff = (
+            "diff --git a/assets/logo.png b/assets/logo.png\n"
+            "new file mode 100644\n"
+            "index 0000000..1111111\n"
+            "Binary files /dev/null and b/assets/logo.png differ\n"
+            'diff --git "a/old name.txt" "b/new name.txt"\n'
+            "similarity index 100%\n"
+            'rename from "old name.txt"\n'
+            'rename to "new name.txt"\n'
+        )
+
+        result = triage_diff(diff)
+        records = parse_unified_diff(diff)
+
+        self.assertEqual(records[0].status, "binary")
+        self.assertEqual(records[0].path, "assets/logo.png")
+        self.assertEqual(records[1].status, "renamed")
+        self.assertEqual(records[1].old_path, "old name.txt")
+        self.assertEqual(records[1].new_path, "new name.txt")
+        self.assertEqual(result["changed_files"], ["assets/logo.png", "new name.txt"])
+        self.assertTrue(result["coverage"]["complete"])
+
+    def test_suspicious_removal_and_addition_get_explicit_signals(self) -> None:
+        diff = (
+            "diff --git a/src/auth/routes.py b/src/auth/routes.py\n"
+            "--- a/src/auth/routes.py\n"
+            "+++ b/src/auth/routes.py\n"
+            "@@ -1,2 +1,3 @@\n"
+            '-    require_role(auth, "billing:write")\n'
+            "+    verify = False\n"
+            '+    API_KEY = "not-a-real-secret"\n'
+            "     return process()\n"
+        )
+
+        report = analyze_file(parse_unified_diff(diff)[0])
+
+        self.assertEqual(report["risk_score"], 5)
+        self.assertIn("removed security check", report["risk_factors"])
+        self.assertIn("dangerous added flag or bypass", report["risk_factors"])
+        self.assertIn("secrets or credential material", report["risk_factors"])
+
+    def test_deletion_persistence_and_side_effect_retry_signals(self) -> None:
+        diff = (
+            "diff --git a/src/db/migration.py b/src/db/migration.py\n"
+            "--- a/src/db/migration.py\n"
+            "+++ b/src/db/migration.py\n"
+            "@@ -1,4 +1 @@\n"
+            "-drop_old_column()\n"
+            "-delete_legacy_rows()\n"
+            "-remove_old_index()\n"
+            "-cleanup_old_table()\n"
+            "+persist_new_schema()\n"
+            "diff --git a/src/workers/charges.py b/src/workers/charges.py\n"
+            "--- a/src/workers/charges.py\n"
+            "+++ b/src/workers/charges.py\n"
+            "@@ -1 +1,2 @@\n"
+            " try:\n"
+            "+    return retry(job, allow_duplicate=True)\n"
+        )
+
+        reports = {report["files"][0]: report for report in triage_diff(diff)["reports"]}
+
+        self.assertIn("deletion-heavy change", reports["src/db/migration.py"]["risk_factors"])
+        self.assertIn("data migration or persistence boundary", reports["src/db/migration.py"]["risk_factors"])
+        self.assertIn("side-effect retry behavior", reports["src/workers/charges.py"]["risk_factors"])
+
+    def test_copied_domain_words_in_tests_do_not_outrank_production(self) -> None:
+        diff = (
+            "diff --git a/src/worker.py b/src/worker.py\n"
+            "--- a/src/worker.py\n"
+            "+++ b/src/worker.py\n"
+            "@@ -1 +1 @@\n"
+            "-return value\n"
+            "+return value + 1\n"
+            "diff --git a/test_worker.py b/test_worker.py\n"
+            "--- a/test_worker.py\n"
+            "+++ b/test_worker.py\n"
+            "@@ -1 +1,2 @@\n"
+            " def test_worker():\n"
+            "+    # authorization, refund, and migration boundaries\n"
+        )
+
+        order = [report["files"][0] for report in triage_diff(diff)["review_order"]]
+
+        self.assertEqual(order[0], "src/worker.py")
+
+    def test_equal_reports_have_path_order_tie_break(self) -> None:
+        reports = [
+            {"unit": "z", "files": ["src/z.py"], "risk_score": 3, "confidence": "medium", "behavioral_surface": 4},
+            {"unit": "a", "files": ["src/a.py"], "risk_score": 3, "confidence": "medium", "behavioral_surface": 4},
+        ]
+
+        ranked = rank_reports(reports)
+
+        self.assertEqual([report["files"][0] for report in ranked], ["src/a.py", "src/z.py"])
 
 
 if __name__ == "__main__":
