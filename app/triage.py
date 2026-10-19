@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any, Iterable, Mapping, Sequence, TypedDict
 
+from .report import format_markdown
+
 
 DISCLAIMER = (
     "This is a suggested review order. Human review is required; "
@@ -100,8 +102,25 @@ _HUNK_RE = re.compile(
 def _path_from_header(value: str, prefix: str | None = None) -> str:
     """Normalize a `---`/`+++` path, including the `/dev/null` marker."""
 
-    path = value[4:] if value.startswith(("--- ", "+++ ")) else value
+    marker_lengths = {
+        "--- ": 4,
+        "+++ ": 4,
+        "rename from ": 12,
+        "rename to ": 10,
+    }
+    path = next(
+        (value[length:] for marker, length in marker_lengths.items() if value.startswith(marker)),
+        value,
+    )
     path = path.split("\t", 1)[0]
+    if path.startswith('"'):
+        try:
+            fields = shlex.split(path, posix=True)
+        except ValueError as exc:
+            raise DiffParseError("malformed quoted file path") from exc
+        if len(fields) != 1:
+            raise DiffParseError("quoted file path must contain one path")
+        path = fields[0]
     if path == "/dev/null":
         return path
     if prefix and path.startswith(prefix + "/"):
@@ -145,19 +164,37 @@ def _parse_block(lines: Sequence[str], start_line: int) -> DiffFile:
 
     # Binary and rename-only changes have no unified hunks but are still files.
     binary = any(line.startswith("Binary files ") for line in lines)
-    rename_to = next((line[10:] for line in lines if line.startswith("rename to ")), None)
-    rename_from = next((line[12:] for line in lines if line.startswith("rename from ")), None)
+    rename_to = next((line for line in lines if line.startswith("rename to ")), None)
+    rename_from = next((line for line in lines if line.startswith("rename from ")), None)
+    if binary:
+        old_path = _path_from_header(lines[old_index], "a") if old_index is not None else (
+            _path_from_header(rename_from) if rename_from else git_old
+        )
+        new_path = _path_from_header(lines[new_index], "b") if new_index is not None else (
+            _path_from_header(rename_to) if rename_to else git_new
+        )
+        path = new_path if new_path and new_path != "/dev/null" else old_path
+        if not path or path == "/dev/null":
+            raise DiffParseError(f"line {start_line}: binary change has no path")
+        return DiffFile(path, "binary", 0, 0, (), old_path, new_path, tuple(lines))
     if old_index is None or new_index is None:
-        if binary:
-            path = git_new or git_old
-            if not path:
-                raise DiffParseError(f"line {start_line}: binary change has no path")
-            return DiffFile(path, "binary", 0, 0, (), git_old, git_new, tuple(lines))
         if rename_to or rename_from:
-            path = _path_from_header(rename_to or rename_from or "")
+            old_path = _path_from_header(rename_from) if rename_from else git_old
+            new_path = _path_from_header(rename_to) if rename_to else git_new
+            path = new_path or old_path
             if not path:
                 raise DiffParseError(f"line {start_line}: rename has no path")
-            return DiffFile(path, "renamed", 0, 0, (), rename_from, rename_to, tuple(lines))
+            return DiffFile(path, "renamed", 0, 0, (), old_path, new_path, tuple(lines))
+        # Git can represent mode-only changes without ---/+++ headers.  Keep
+        # them in the review plan instead of dropping the changed path.
+        if git_new or git_old:
+            metadata_only = all(
+                line.startswith(("diff --git ", "index ", "old mode ", "new mode "))
+                for line in lines
+            )
+            if metadata_only:
+                path = git_new or git_old
+                return DiffFile(path, "modified", 0, 0, (), git_old, git_new, tuple(lines))
         raise DiffParseError(f"line {start_line}: file block is missing ---/+++ headers")
 
     old_path = _path_from_header(lines[old_index], "a")
@@ -288,6 +325,49 @@ def _changed_lines(record: DiffFile) -> list[str]:
     return [line[1:] for hunk in record.hunks for line in hunk.lines if line[:1] in "+-"]
 
 
+def _added_lines(record: DiffFile) -> list[str]:
+    """Return only source lines introduced by the change."""
+
+    return [line[1:] for hunk in record.hunks for line in hunk.lines if line.startswith("+")]
+
+
+def _deleted_lines(record: DiffFile) -> list[str]:
+    """Return only source lines removed by the change."""
+
+    return [line[1:] for hunk in record.hunks for line in hunk.lines if line.startswith("-")]
+
+
+_SECURITY_CHECK_RE = re.compile(
+    r"\b(?:auth(?:enticate|orization)?|authorize|check[_ -]?(?:auth|permission|access)|"
+    r"require[_ -]?(?:auth|role|permission|login)|permission|privilege|acl|csrf|"
+    r"verify[_ -]?(?:token|signature|auth)|validate[_ -]?(?:token|session)|"
+    r"is[_ -]?authenticated|access[_ -]?check|security[_ -]?check)\w*\b",
+    re.IGNORECASE,
+)
+_DANGEROUS_ADDITION_RE = re.compile(
+    r"(?:\b(?:allow[_ -]?duplicate|allow[_ -]?(?:unverified|insecure|any)|"
+    r"bypass(?:ed|ing)?(?:[_ -]?(?:auth|authorization|validation|check))?|"
+    r"skip[_ -]?(?:auth|authorization|validation|verify|checks?)|"
+    r"disable[_ -]?(?:auth|authorization|csrf|verify|checks?)|"
+    r"ignore[_ -]?(?:auth|authorization|validation|verify)|"
+    r"permit[_ -]?all|admin[_ -]?override|trust[_ -]?all|unsafe|insecure|"
+    r"force[_ -]?(?:allow|send|delete|write))\b|"
+    r"\bverify\s*=\s*false\b|--(?:skip|no)[-_](?:auth|verify|checks?)",
+    re.IGNORECASE,
+)
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"\b(?:api[_ -]?key|access[_ -]?key|secret(?:[_ -]?key)?|password|passwd|"
+    r"private[_ -]?key|client[_ -]?secret|access[_ -]?token)\b\s*[:=]",
+    re.IGNORECASE,
+)
+_SIDE_EFFECT_RE = re.compile(
+    r"\b(?:retry|backoff|idempot(?:ent|ency)|allow[_ -]?duplicate|"
+    r"(?:send|charge|refund|publish|enqueue|write|save|delete|create|update)\s*\(|"
+    r"side[_ -]?effect)\b",
+    re.IGNORECASE,
+)
+
+
 def _unit_name(path: str) -> str:
     """Create a stable, readable unit identifier from a POSIX path."""
 
@@ -305,7 +385,10 @@ def analyze_file(record: DiffFile, reviewer_focus: str | None = None) -> ReviewR
     """Analyze one file with deterministic, explainable review heuristics."""
 
     path_lower = record.path.lower()
+    added_text = "\n".join(_added_lines(record)).lower()
+    deleted_text = "\n".join(_deleted_lines(record)).lower()
     text = "\n".join(_changed_lines(record)).lower()
+    signal_text = path_lower + " " + text
     factors: list[str] = []
 
     def add_factor(label: str) -> None:
@@ -322,20 +405,36 @@ def analyze_file(record: DiffFile, reviewer_focus: str | None = None) -> ReviewR
         add_factor("test-only change")
     if record.status in {"added", "deleted", "renamed"}:
         add_factor(f"{record.status} file boundary")
-    if re.search(r"auth|authoriz|permission|\bacl\b|credential|secret|token|session|csrf", path_lower + " " + text):
+    if re.search(r"auth|authoriz|permission|\bacl\b|credential|secret|token|session|csrf", signal_text):
         add_factor("authorization or security boundary")
-    if re.search(r"payment|billing|refund|financial|charge|money|balance", path_lower + " " + text):
+    if re.search(r"payment|billing|refund|financial|charge|money|balance", signal_text):
         add_factor("financial or high-integrity state")
-    if re.search(r"migration|schema|database|\bdb\b|drop table|delete from", path_lower + " " + text):
+    if re.search(r"migration|migrate|schema|database|\bdb\b|persist|storage|drop table|delete from|truncate", signal_text):
         add_factor("data migration or persistence boundary")
-    if re.search(r"api|route|endpoint|http|graphql|openapi|public", path_lower + " " + text):
+    if re.search(r"api|route|endpoint|http|graphql|openapi|public", signal_text):
         add_factor("externally visible contract")
-    if re.search(r"transaction|retry|idempot|duplicate|queue|concurr|async|thread|lock|side effect", path_lower + " " + text):
+    if re.search(r"transaction|retry|idempot|duplicate|queue|concurr|async|thread|lock|side effect", signal_text):
         add_factor("state transition or failure-mode behavior")
-    if re.search(r"error|exception|timeout|fallback|rollback", path_lower + " " + text):
+    if re.search(r"error|exception|timeout|fallback|rollback", signal_text):
         add_factor("error handling or recovery path")
-    if re.search(r"boundary|off.by.one|index|slice|offset|range\(|<=|>=|loop", path_lower + " " + text):
+    if re.search(r"boundary|off.by.one|index|slice|offset|range\(|<=|>=|loop", signal_text):
         add_factor("boundary-sensitive transformation")
+
+    # Direction matters: a security term in a deleted line is stronger than a
+    # copied mention in surrounding context, and a newly added bypass is an
+    # explicit hazard even when the path itself is generic.
+    if deleted_text and _SECURITY_CHECK_RE.search(deleted_text):
+        add_factor("removed security check")
+    if added_text and _DANGEROUS_ADDITION_RE.search(added_text):
+        add_factor("dangerous added flag or bypass")
+    if record.deletions >= 3 and record.deletions >= max(record.additions * 2, 1):
+        add_factor("deletion-heavy change")
+    if re.search(r"secret|credential|password|passwd|private[_ -]?key|api[_ -]?key|access[_ -]?token|\.env", path_lower):
+        add_factor("secrets or credential material")
+    elif added_text and _SECRET_ASSIGNMENT_RE.search(added_text):
+        add_factor("secrets or credential material")
+    if _SIDE_EFFECT_RE.search(signal_text):
+        add_factor("side-effect retry behavior")
     if reviewer_focus and reviewer_focus.lower() in path_lower + " " + text:
         add_factor(f"reviewer focus: {reviewer_focus}")
 
@@ -344,11 +443,18 @@ def analyze_file(record: DiffFile, reviewer_focus: str | None = None) -> ReviewR
         "financial or high-integrity state",
         "data migration or persistence boundary",
         "externally visible contract",
+        "removed security check",
+        "dangerous added flag or bypass",
+        "secrets or credential material",
     }
     if critical.intersection(factors):
         risk_score = 5
+    elif "side-effect retry behavior" in factors:
+        risk_score = 5
     elif "state transition or failure-mode behavior" in factors:
-        risk_score = 5 if re.search(r"retry|transaction|duplicate|side effect", text) else 4
+        risk_score = 4
+    elif "deletion-heavy change" in factors:
+        risk_score = 4
     elif "boundary-sensitive transformation" in factors or "error handling or recovery path" in factors:
         risk_score = 4
     elif is_docs and not record.hunks:
@@ -370,6 +476,13 @@ def analyze_file(record: DiffFile, reviewer_focus: str | None = None) -> ReviewR
     if record.status == "binary" and risk_score < 3:
         risk_score = 3
 
+    # Tests are useful evidence, but they should not outrank production
+    # behavior because they repeat its domain vocabulary.  Apply this after
+    # binary/status adjustments so every test file remains consistently low
+    # priority regardless of its representation.
+    if is_test:
+        risk_score = min(risk_score, 2)
+
     if record.status == "added":
         action = "Added"
     elif record.status == "deleted":
@@ -388,6 +501,12 @@ def analyze_file(record: DiffFile, reviewer_focus: str | None = None) -> ReviewR
     questions: list[str] = []
     if "authorization or security boundary" in factors:
         questions.append("Are authentication, authorization, and least-privilege checks preserved on every path?")
+    if "removed security check" in factors:
+        questions.append("What security control was removed, and what equivalent protection now covers this path?")
+    if "dangerous added flag or bypass" in factors:
+        questions.append("Can the new flag or bypass disable validation, authorization, or duplicate protection in production?")
+    if "secrets or credential material" in factors:
+        questions.append("Are credentials absent from source control, logs, examples, and generated artifacts?")
     if "financial or high-integrity state" in factors:
         questions.append("Can invalid, repeated, or partial inputs alter financial or other high-integrity state?")
     if "data migration or persistence boundary" in factors:
@@ -396,6 +515,10 @@ def analyze_file(record: DiffFile, reviewer_focus: str | None = None) -> ReviewR
         questions.append("Do callers, validation, compatibility, and error responses still match the public contract?")
     if "state transition or failure-mode behavior" in factors:
         questions.append("What happens after a timeout, retry, crash, or concurrent invocation?")
+    if "side-effect retry behavior" in factors:
+        questions.append("Is the side effect idempotent, or can a retry repeat it after an ambiguous failure?")
+    if "deletion-heavy change" in factors:
+        questions.append("Which removed behavior is intentionally obsolete, and is rollback or compatibility still possible?")
     if "boundary-sensitive transformation" in factors:
         questions.append("What are the empty, first, last, and just-outside-the-range cases?")
     if record.hunks and not is_test:
@@ -425,7 +548,8 @@ def analyze_file(record: DiffFile, reviewer_focus: str | None = None) -> ReviewR
         "boundary-sensitive transformation": 4,
     }
     behavioral_surface = max(1, record.additions + record.deletions)
-    behavioral_surface += sum(surface_weights.get(factor, 0) for factor in factors)
+    if not is_test:
+        behavioral_surface += sum(surface_weights.get(factor, 0) for factor in factors)
 
     return {
         "unit": _unit_name(record.path),
@@ -507,6 +631,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("diff", nargs="?", help="path to a unified diff file; use --stdin for standard input")
     parser.add_argument("--stdin", action="store_true", help="read the unified diff from standard input")
     parser.add_argument("--reviewer-focus", help="optional focus keyword, such as security or compatibility")
+    parser.add_argument("--format", choices=("json", "markdown"), default="json", help="output format (default: json)")
+    parser.add_argument("--output", metavar="PATH", help="write the rendered report to PATH instead of standard output")
     return parser
 
 
@@ -535,7 +661,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     result = triage_diff(diff_text, args.reviewer_focus)
-    print(json.dumps(result, indent=2, sort_keys=True))
+    rendered = format_markdown(result) if args.format == "markdown" else json.dumps(result, indent=2, sort_keys=True)
+    if args.output:
+        try:
+            with open(args.output, "w", encoding="utf-8", newline="\n") as output_file:
+                output_file.write(rendered)
+                output_file.write("\n")
+        except OSError as exc:
+            print(json.dumps({"errors": [str(exc)], "disclaimer": DISCLAIMER}, indent=2))
+            return 2
+    else:
+        print(rendered)
     return 2 if result["input_status"] == "malformed" else 0
 
 

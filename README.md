@@ -44,13 +44,31 @@ Use an optional reviewer focus to add a matching review signal:
 python -m app --reviewer-focus security changes.diff
 ```
 
-The command prints JSON containing:
+JSON is the default output format and prints:
 
 - `review_order`: ranked reports, highest risk first;
 - `what_changed`, `why_it_might_be_risky`, and `questions_for_human`;
 - `evidence`: the changed path and new-file hunk range;
 - `coverage`: proof that every parsed changed file was included;
 - `disclaimer`: an explicit statement that human review is required.
+
+For a reviewer-facing Markdown report, select the Markdown formatter:
+
+```bash
+python -m app --format markdown changes.diff
+```
+
+The report includes the input status, ranked review order, risk labels and
+scores, change explanations, evidence, questions for a human reviewer, a
+coverage summary, and the explicit non-approval disclaimer. Write the rendered
+report to a file with `--output`:
+
+```bash
+python -m app --format markdown --output review-report.md changes.diff
+```
+
+`--output` replaces standard output for that invocation; JSON remains the
+default when `--format` is omitted.
 
 Malformed input returns a structured error and exit code `2`; empty input is
 reported as `input_status: "empty"` rather than silently treated as a pass.
