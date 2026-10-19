@@ -360,6 +360,13 @@ def analyze_file(record: DiffFile, reviewer_focus: str | None = None) -> ReviewR
     else:
         risk_score = 2
 
+    # Test files can mention the production concern they cover.  That context is
+    # useful evidence, but the test change itself should not outrank the
+    # production behavior merely because it contains words such as "refund" or
+    # "charge".
+    if is_test and risk_score > 2:
+        risk_score = 2
+
     if record.status == "binary" and risk_score < 3:
         risk_score = 3
 

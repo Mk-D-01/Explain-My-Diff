@@ -1,0 +1,26 @@
+diff --git a/src/workers/charges.py b/src/workers/charges.py
+index 1111111..2222222 100644
+--- a/src/workers/charges.py
++++ b/src/workers/charges.py
+@@ -30,4 +30,4 @@ def charge(job, gateway):
+     try:
+         gateway.charge(job.customer, job.amount)
+     except TimeoutError:
+-        return retry(job)
++        return retry(job, allow_duplicate=True)
+diff --git a/src/workers/metrics.py b/src/workers/metrics.py
+index 3333333..4444444 100644
+--- a/src/workers/metrics.py
++++ b/src/workers/metrics.py
+@@ -1,2 +1,3 @@
+ def record(name, value):
++    # Metrics are best effort.
+     return sink.write(name, value)
+diff --git a/tests/test_metrics.py b/tests/test_metrics.py
+index 5555555..6666666 100644
+--- a/tests/test_metrics.py
++++ b/tests/test_metrics.py
+@@ -1,2 +1,3 @@
+ def test_metrics():
++    assert True
+     record("charge", 1)

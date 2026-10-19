@@ -8,3 +8,8 @@ dist/
 build/
 *.egg-info/
 .DS_Store
+
+# Local OmniRush/OpenCode workspace metadata is machine-specific.
+omnirush.json
+package.json
+package-lock.json
