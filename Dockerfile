@@ -8,5 +8,6 @@ COPY requirements.lock ./
 RUN python -m pip install --no-cache-dir --requirement requirements.lock
 COPY app ./app
 COPY tests ./tests
+COPY scripts ./scripts
 
 CMD ["python", "-m", "app"]

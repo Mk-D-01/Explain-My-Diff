@@ -119,3 +119,14 @@ The fixed fixtures under `tests/fixtures/` contain one planted bug each:
 | `fixture-c.diff` | Retry can duplicate a charge | Buggy worker in the top two |
 
 Run `make test` to execute the complete offline evaluation.
+
+For a judge-friendly scorecard with both a readable summary and machine-readable
+JSON, run:
+
+```bash
+make evaluate
+```
+
+The current target is 3/3 planted bugs ranked in the top two, with complete
+changed-file coverage. The scorecard is a ranking check only; human review is
+still required.
