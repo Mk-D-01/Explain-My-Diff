@@ -70,6 +70,28 @@ python -m app --format markdown --output review-report.md changes.diff
 `--output` replaces standard output for that invocation; JSON remains the
 default when `--format` is omitted.
 
+## Browser interface
+
+Run the local browser interface with:
+
+```bash
+python -m app.web
+```
+
+It binds to `0.0.0.0` and listens on port `8080` by default. Set `PORT` to
+choose another port, for example `PORT=9000 python -m app.web`, then open
+`http://localhost:9000/`. The interface accepts a pasted unified diff and an
+optional reviewer focus, and displays the same JSON triage result plus its
+rendered Markdown report. Requests are handled locally; the server does not
+execute reviewed code or make network calls. Request bodies are limited to 1 MiB
+and malformed or missing fields receive JSON client errors.
+
+The API endpoints are:
+
+- `GET /health` — returns `{"status": "ok"}`;
+- `POST /api/triage` — accepts `{"diff": "...", "reviewer_focus": "..."}` and
+  returns the triage fields with an additional `markdown` field.
+
 Malformed input returns a structured error and exit code `2`; empty input is
 reported as `input_status: "empty"` rather than silently treated as a pass.
 

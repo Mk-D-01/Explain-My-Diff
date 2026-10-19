@@ -10,4 +10,6 @@ COPY app ./app
 COPY tests ./tests
 COPY scripts ./scripts
 
-CMD ["python", "-m", "app"]
+EXPOSE 8080
+
+CMD ["python", "-m", "app.web"]
