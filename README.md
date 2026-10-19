@@ -111,14 +111,38 @@ fixed planted-bug evaluation fixtures.
 
 ```bash
 docker build --tag explain-my-diff .
-docker run --rm explain-my-diff
+docker run --rm --publish 8080:8080 explain-my-diff
+```
+
+Open `http://localhost:8080/` after the container starts. Check the service
+without opening the UI:
+
+```bash
+curl http://localhost:8080/health
+```
+
+Expected response:
+
+```json
+{"status": "ok"}
 ```
 
 ## Deploy
 
-Build the image in a CI or container registry, then deploy the tagged image
-using the target platform's standard container deployment flow. No cloud
-provider is configured in this version.
+The repository includes a Render Blueprint in `render.yaml`. To create a live
+deployment URL:
+
+1. Push this repository to GitHub.
+2. Sign in to [Render](https://render.com) and choose **New → Blueprint**.
+3. Select the GitHub repository and confirm the `render.yaml` configuration.
+4. Deploy the service. Render supplies the public HTTPS URL.
+5. Verify `https://YOUR-SERVICE.onrender.com/health` returns `{"status":"ok"}`.
+6. Open `https://YOUR-SERVICE.onrender.com/` and paste a unified diff.
+
+The server binds to `0.0.0.0` and reads the platform-provided `PORT` value, so
+it works both locally and on Render. No secrets or environment variables are
+required for this version. The live URL cannot be created from this repository
+without your hosting account authorization.
 
 ## Safety and limitations
 

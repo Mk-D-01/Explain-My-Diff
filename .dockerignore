@@ -1,0 +1,13 @@
+.git
+.gitignore
+.venv
+__pycache__
+*.py[cod]
+.env
+.pytest_cache
+.coverage
+dist
+build
+*.egg-info
+README.md
+PR_REVIEW_TRIAGE_PROJECT.md

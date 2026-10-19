@@ -10,6 +10,11 @@ COPY app ./app
 COPY tests ./tests
 COPY scripts ./scripts
 
+# The service does not need root privileges at runtime.
+RUN addgroup --system app && adduser --system --ingroup app app \
+    && chown -R app:app /app
+USER app
+
 EXPOSE 8080
 
 CMD ["python", "-m", "app.web"]
